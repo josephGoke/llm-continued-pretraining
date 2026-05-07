@@ -1,0 +1,62 @@
+model:
+  name: meta-llama/Llama-3.2-3b
+  tokenizer_name: meta-llama/Llama-3.2-7b
+  max_seq_length: 2048
+
+data:
+  train_path: ./data/train.jsonl
+  validation_path: ./data/val.jsonl
+  field_name: text
+  validation_split: 0.1
+  streaming: false  # Set to true to stream datasets from HF Hub (e.g., 'wikitext', 'openwebtext')
+  num_workers: 4
+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
+training:
+  output_dir: ./outputs/checkpoint
+  num_epochs: 3
+  learning_rate: 5e-5
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  warmup_steps: 500
+  max_steps: -1
+  weight_decay: 0.01
+  lr_scheduler_type: cosine
+  seed: 42
+  gradient_checkpointing: true
+  mixed_precision: bf16
+
+evaluation:
+  eval_interval: 500
+  eval_dataset_size: 1000
+  save_best_model: true
+  metric_for_best_model: loss
+  greater_is_better: false
+
+checkpointing:
+  save_interval: 1000
+  save_total_limit: 3
+  resume_from_checkpoint: null
+  overwrite_output_dir: false
+
+distributed:
+  use_fsdp: true
+  fsdp_config:
+    sharding_strategy: FULL_SHARD
+    cpu_offload: false
+    backward_prefetch: BACKWARD_PRE
+    state_dict_type: SHARDED
+    limit_all_gathers: true
+
+logging:
+  logging_interval: 10
+  logging_dir: ./outputs/logs
+  use_wandb: True  # Set to true to enable Weights & Biases monitoring
+  wandb_project: llm-continued-pretraining
+  wandb_entity: adegokejoseph6-personal  # Set W&B entity/team name
+  log_model: True
+
+model_upload:
+  push_to_hub: false
+  hub_model_id: null
+  hub_private: true
+  commit_message: "Continued pretraining checkpoint"

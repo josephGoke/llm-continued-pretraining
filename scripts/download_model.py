@@ -128,4 +128,4 @@ Examples:
         logger.info("\n✓ Download successful!")
     except Exception as e:
         logger.error(f"\n✗ Download failed: {e}")
-        exit(1)
+        exit(1) 

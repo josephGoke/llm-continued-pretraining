@@ -8,9 +8,9 @@ data:
   validation_path: ./data/val.jsonl
   field_name: text
   validation_split: 0.1
-  streaming: false  # Set to true to stream datasets from HF Hub (e.g., 'wikitext', 'openwebtext')
+  streaming: True  # Set to true to stream datasets from HF Hub (e.g., 'wikitext', 'openwebtext')
   num_workers: 4
-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
+
 training:
   output_dir: ./outputs/checkpoint
   num_epochs: 3

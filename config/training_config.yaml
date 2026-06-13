@@ -8,7 +8,7 @@ data:
   validation_path: ./data/val.jsonl
   field_name: text
   validation_split: 0.1
-  streaming: False  # Set to true to stream datasets from HF Hub (e.g., 'wikitext', 'openwebtext')
+  streaming: False  # Set to true to stream datasets from HF Hub
   num_workers: 4
   corpus: ./folder
   streaming: True

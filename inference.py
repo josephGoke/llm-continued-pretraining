@@ -34,7 +34,7 @@ class PretrainedModelInference:
         logger.info(f"Loading model from {model_path}")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto" if "cuda" in device else None,
         )
         
@@ -48,7 +48,7 @@ class PretrainedModelInference:
     def generate(
         self,
         prompt: str,
-        max_length: int = 512,
+        max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
         num_return_sequences: int = 1,
@@ -59,7 +59,7 @@ class PretrainedModelInference:
         
         Args:
             prompt: Input text prompt
-            max_length: Maximum length of generated sequence
+            max_new_tokens: Maximum new tokens to generate
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
             num_return_sequences: Number of sequences to generate
@@ -73,7 +73,7 @@ class PretrainedModelInference:
             
             output_ids = self.model.generate(
                 **inputs,
-                max_length=max_length,
+                max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 num_return_sequences=num_return_sequences,
@@ -93,7 +93,7 @@ class PretrainedModelInference:
     def generate_batch(
         self,
         prompts: List[str],
-        max_length: int = 512,
+        max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
         repetition_penalty: float = 1.2,
@@ -103,7 +103,7 @@ class PretrainedModelInference:
         for prompt in prompts:
             result = self.generate(
                 prompt=prompt,
-                max_length=max_length,
+                max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
@@ -134,10 +134,10 @@ def main():
         help="Prompt to generate from (if not provided, enters interactive mode)",
     )
     parser.add_argument(
-        "--max_length",
+        "--max_new_tokens",
         type=int,
         default=512,
-        help="Maximum generation length",
+        help="Maximum new tokens to generate",
     )
     parser.add_argument(
         "--temperature",
@@ -161,7 +161,7 @@ def main():
         # Single prompt mode
         outputs = model.generate(
             prompt=args.prompt,
-            max_length=args.max_length,
+            max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
         )
@@ -183,7 +183,7 @@ def main():
             
             outputs = model.generate(
                 prompt=prompt,
-                max_length=args.max_length,
+                max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_p=args.top_p,
             )

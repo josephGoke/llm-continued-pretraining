@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 from pathlib import Path
 
 import torch
-from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler, DistributedSampler
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 try:
@@ -134,12 +134,14 @@ class JSONLDataset(Dataset):
 def create_data_loaders(
     train_path: str,
     validation_path: Optional[str],
+    world_size: int = 1,
+    rank: int = 0,
     tokenizer: PreTrainedTokenizer,
     batch_size: int = 8,
     max_seq_length: int = 2048,
     field_name: str = "text",
     num_workers: int = 0,
-    pin_memory: bool = True,
+    pin_memory: bool = False,
     streaming: bool = False,
 ) -> tuple:
     """
@@ -162,6 +164,8 @@ def create_data_loaders(
     """
     logger.info("Creating datasets...")
     
+    pin_memory = torch.cuda.is_available()
+
     # Check if using streaming (dataset identifier) or local files
     if streaming and HAS_DATASETS:
         logger.info(f"Using streaming dataset: {train_path}")

@@ -10,12 +10,27 @@ import argparse
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
-
+import random
+import numpy as np
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardingStrategy, CPUOffload, BackwardPrefetch
-from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+
+from utils import (
+    set_seed,
+    load_config,
+    setup_distributed,
+    setup_wandb,
+    transformer_layer_wrap_policy,
+    activation_wrap_policy,
+    precision_policy,
+    find_latest_checkpoint,
+    setup_fsdp_model,
+    save_checkpoint
+)
+
+from data import create_data_loaders
+from utils import model_config_validator, EarlyStopping
+
 from torch.cuda.amp import autocast, GradScaler
 from transformers import (
     AutoModelForCausalLM,
@@ -23,18 +38,9 @@ from transformers import (
     get_cosine_schedule_with_warmup,
     get_linear_schedule_with_warmup,
 )
-import yaml
 from tqdm import tqdm
 import functools
 
-import wandb
-
-try:
-    HAS_WANDB = True
-except ImportError:
-    HAS_WANDB = False
-
-from data.data_loader import create_data_loaders
 
 # Configure logging
 logging.basicConfig(
@@ -45,119 +51,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_config(config_path: str) -> dict:
-    """Load training config from YAML file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
-
-
-def setup_distributed():
-    """Initialize distributed training."""
-    if not torch.distributed.is_available():
-        logger.warning("Distributed training not available, running single GPU")
-        return False
-    
-    if torch.cuda.is_available():
-        torch.distributed.init_process_group(backend="nccl")
-        torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
-        logger.info(f"Initialized NCCL backend, rank {dist.get_rank()}")
-        return True
-    return False
-
-
-def find_latest_checkpoint(output_dir: Path) -> Optional[Path]:
-    """Find the latest checkpoint in output directory."""
-    checkpoints = sorted(
-        [d for d in output_dir.glob("checkpoint-*") if d.is_dir()],
-        key=lambda x: int(x.name.split("-")[-1]),
-    )
-    return checkpoints[-1] if checkpoints else None
-
-
-def setup_wandb(config: dict, is_main_process: bool):
-    """Initialize Weights & Biases logging."""
-    if not is_main_process or not HAS_WANDB:
-        return
-    
-    wandb_cfg = config.get("logging", {})
-    if not wandb_cfg.get("use_wandb", False):
-        return
-    
-    wandb.init(
-        project=wandb_cfg.get("wandb_project", "llm-pretraining"),
-        entity=wandb_cfg.get("wandb_entity"),
-        config={
-            "model": config.get("model", {}),
-            "training": config.get("training", {}),
-        },
-        name=f"pretraining-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-    )
-    logger.info("✓ Weights & Biases initialized")
-
-
-def get_model_layer_class(model):
-    """
-    Detect and return the transformer layer class for the model.
-    Supports Llama, Mistral, Qwen, GPT-2, Bloom, Falcon, OPT, etc.
-    Useful for advanced FSDP configurations.
-    """
-    model_type = model.config.model_type.lower() if hasattr(model.config, 'model_type') else ""
-    
-    # Map model types to their decoder/transformer layer classes
-    layer_class_map = {
-        "llama": "LlamaDecoderLayer",
-        "mistral": "MistralDecoderLayer",
-        "qwen": "QWenBlock",
-        "gpt2": "GPT2Block",
-        "gpt-2": "GPT2Block",
-        "bloom": "BloomBlock",
-        "falcon": "FalconDecoderLayer",
-        "opt": "OPTDecoderLayer",
-    }
-    
-    try:
-        if model_type in layer_class_map:
-            layer_name = layer_class_map[model_type]
-            logger.debug(f"Detected model type: {model_type}, layer class: {layer_name}")
-            return layer_name
-    except Exception as e:
-        logger.debug(f"Could not detect layer class: {e}")
-    
-    return None
-
-
-def setup_fsdp_model(model, config):
-    """
-    Wrap model with FSDP for distributed training.
-    Uses layer-wise auto-wrap policy for efficient communication and compute overlap.
-    """
-    if not dist.is_available() or not dist.is_initialized():
-        logger.warning("Distributed not initialized, skipping FSDP wrapping")
-        return model
-    
-    fsdp_cfg = config.get("distributed", {}).get("fsdp_config", {})
-    
-    # Layer-wise auto-wrap policy: wraps each transformer block independently
-    # Benefit: better gradient accumulation, reduced comm overhead, compute/comm overlap
-    auto_wrap_policy = functools.partial(
-        lambda_auto_wrap_policy,
-        excluded_modules={torch.nn.Embedding},  #(small, frequent syncs)
-    )
-    
-    model = FSDP(
-        model,
-        auto_wrap_policy=auto_wrap_policy,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
-        cpu_offload=CPUOffload(offload_params=fsdp_cfg.get("cpu_offload", False)),
-        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
-        limit_all_gathers=fsdp_cfg.get("limit_all_gathers", True),
-        sync_module_states=True,
-        device_id=torch.cuda.current_device(),
-    )
-    
-    logger.info("✔ Model wrapped with FSDP (layer-wise auto-wrap policy enabled)")
-    return model
 
 
 def train(
@@ -170,6 +63,7 @@ def train(
     # Load config
     config = load_config(config_path)
     
+
     # Setup distributed training
     use_distributed = world_size > 1
     if use_distributed:
@@ -183,8 +77,15 @@ def train(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     if is_main_process:
+        try:
+            model_config_validator(config)
+        except Exception as e:
+            logger.error(f"Config validation failed: {e}")
+            raise
         logger.info(f"Using device: {device}")
         logger.info(f"Distributed training: {use_distributed} (rank {rank}/{world_size})")
+    
+        
     
     # Create output directory
     output_dir = Path(config["training"]["output_dir"])
@@ -204,17 +105,22 @@ def train(
     
     # Setup W&B monitoring
     setup_wandb(config, is_main_process)
+    set_seed(config["training"].get("seed", 42))
     
     # Load model and tokenizer
     if is_main_process:
         logger.info(f"Loading model: {config['model']['name']}")
     
-    model = AutoModelForCausalLM.from_pretrained(
-        config["model"]["name"],
-        torch_dtype=torch.bfloat16 if config["training"]["mixed_precision"] == "bf16" else torch.float32,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(config["model"]["tokenizer_name"])
+    # If resuming, load weights from checkpoint instead of base model
+    resume_path = find_latest_checkpoint(output_dir) if find_latest_checkpoint(output_dir) else config["checkpointing"].get("resume_from_checkpoint")
+    model_name_or_path = str(resume_path) if resume_path and Path(resume_path).exists() else config["model"]["name"]
     
+    if is_main_process and hasattr(config["model"], "name") and model_name_or_path != config["model"]["name"]:
+        logger.info(f"Resuming model weights from {model_name_or_path}")
+    
+    model, tokenizer = setup_model()
+
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
@@ -222,6 +128,10 @@ def train(
     
     if config["training"]["gradient_checkpointing"]:
         model.gradient_checkpointing_enable()
+    
+    # if is_main_process:
+    #     pre_flight_check(config, model, tokenizer)
+
     
     # Setup FSDP if distributed
     if use_distributed:
@@ -239,7 +149,7 @@ def train(
     
     train_loader, val_loader = create_data_loaders(
         train_path=config["data"]["train_path"],
-        validation_path=config["data"].get("validation_path"),
+        validation_path=config["data"].get("validation_path"), world_size=world_size, rank=rank,
         tokenizer=tokenizer,
         batch_size=config["training"]["batch_size"],
         max_seq_length=config["model"]["max_seq_length"],
@@ -250,9 +160,9 @@ def train(
     
     # Setup gradient scaler for mixed precision
     use_amp = config["training"].get("mixed_precision") == "bf16"
-    grad_scaler = GradScaler(enabled=use_amp) if use_amp else None
+    grad_scaler = GradScaler("cuda", enabled=use_amp) if use_amp else None
     if is_main_process and use_amp:
-        logger.info("✓ Gradient scaling enabled for BF16 training")
+        logger.info("[OK] Gradient scaling enabled for BF16 training")
     
     # Setup optimizer
     no_decay = ["bias", "LayerNorm.weight"]
@@ -289,6 +199,8 @@ def train(
     global_step = 0
     best_val_loss = float("inf")
     
+    early_stopper = EarlyStopping(patience=config.get("evaluation", {}).get("patience", 3))
+    
     # Error recovery: check for existing checkpoints
     resume_checkpoint = find_latest_checkpoint(output_dir)
     if resume_checkpoint and config["checkpointing"].get("resume_from_checkpoint") is None:
@@ -296,9 +208,37 @@ def train(
             logger.info(f"Found checkpoint {resume_checkpoint}, will resume from there")
         config["checkpointing"]["resume_from_checkpoint"] = str(resume_checkpoint)
     
+    state_file = None
+    resume_epoch = 0
+    if config["checkpointing"].get("resume_from_checkpoint"):
+        checkpoint_path = Path(config["checkpointing"]["resume_from_checkpoint"])
+        if checkpoint_path.exists():
+            state_file = checkpoint_path / "training_state.pt"
+            if state_file.exists():
+                if is_main_process:
+                    logger.info(f"Loading training state from {state_file}")
+                
+                loc = "cuda:{}".format(local_rank) if use_distributed else device
+                try:
+                    checkpoint_state = torch.load(state_file, map_location=loc)
+                    optimizer.load_state_dict(checkpoint_state["optimizer"])
+                    scheduler.load_state_dict(checkpoint_state["scheduler"])
+                    global_step = checkpoint_state.get("global_step", 0)
+                    best_val_loss = checkpoint_state.get("best_val_loss", float("inf"))
+                    resume_epoch = checkpoint_state.get("epoch", 0)
+                    
+                    if is_main_process:
+                        logger.info(f"Resumed from step {global_step}, epoch {resume_epoch}")
+                except Exception as e:
+                    if is_main_process:
+                        logger.warning(f"Could not load training state: {e}")
+            
     try:
     
         for epoch in range(config["training"]["num_epochs"]):
+            if state_file and epoch < resume_epoch:
+                continue
+
             epoch_loss = 0.0
             
             if is_main_process:
@@ -316,7 +256,7 @@ def train(
                 labels = batch["labels"].to(device)
                 
                 # Forward pass with autocast for mixed precision
-                with autocast(enabled=use_amp, dtype=torch.bfloat16):
+                with torch.amp.autocast('cuda', enabled=use_amp, dtype=torch.bfloat16):
                     outputs = model(input_ids=input_ids, labels=labels)
                     loss = outputs.loss
                 
@@ -377,6 +317,13 @@ def train(
                     
                     val_loss_avg = val_loss / val_steps if val_steps > 0 else 0
                     
+                    # Synchronize validation loss across all ranks
+                    if use_distributed:
+                        val_loss_tensor = torch.tensor(val_loss_avg, device=device)
+                        dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
+                        val_loss_avg = val_loss_tensor.item()
+
+
                     if is_main_process:
                         logger.info(f"Step {global_step}: val_loss={val_loss_avg:.4f}")
                         
@@ -388,33 +335,29 @@ def train(
                             })
                         
                         # Save checkpoint if best model
+
+                        if early_stopper(val_loss_avg):
+                            logger.info("Early stopping triggered!")
+                            break
                         if val_loss_avg < best_val_loss:
                             best_val_loss = val_loss_avg
                             checkpoint_dir = output_dir / f"best_model"
                             checkpoint_dir.mkdir(exist_ok=True)
                             
-                            if use_distributed:
-                                model.module.save_pretrained(checkpoint_dir)
-                            else:
-                                model.save_pretrained(checkpoint_dir)
-                            
-                            tokenizer.save_pretrained(checkpoint_dir)
-                            logger.info(f"Saved best model to {checkpoint_dir}")
+                            save_checkpoint(model, tokenizer, optimizer, scheduler, global_step, epoch, best_val_loss, checkpoint_dir, use_distributed, is_main_process)
                     
                     model.train()
                 
-                # Periodic checkpoint
+                # Evaluate early stopping globally using synchronized val_loss_avg
+                if early_stopper(val_loss_avg):
+                    if is_main_process:
+                        logger.info("Early stopping triggered!")
+                    break
                 if global_step % config["checkpointing"]["save_interval"] == 0 and is_main_process:
                     checkpoint_dir = output_dir / f"checkpoint-{global_step}"
                     checkpoint_dir.mkdir(exist_ok=True)
                     
-                    if use_distributed:
-                        model.module.save_pretrained(checkpoint_dir)
-                    else:
-                        model.save_pretrained(checkpoint_dir)
-                    
-                    tokenizer.save_pretrained(checkpoint_dir)
-                    logger.info(f"Saved checkpoint to {checkpoint_dir}")
+                    save_checkpoint(model, tokenizer, optimizer, scheduler, global_step, epoch, best_val_loss, checkpoint_dir, use_distributed, is_main_process)
         
     except KeyboardInterrupt:
         if is_main_process:
@@ -422,12 +365,7 @@ def train(
             logger.info("Saving checkpoint before exit...")
             checkpoint_dir = output_dir / f"checkpoint-interrupted-{global_step}"
             checkpoint_dir.mkdir(exist_ok=True)
-            if use_distributed:
-                model.module.save_pretrained(checkpoint_dir)
-            else:
-                model.save_pretrained(checkpoint_dir)
-            tokenizer.save_pretrained(checkpoint_dir)
-            logger.info(f"Saved interrupt checkpoint to {checkpoint_dir}")
+            save_checkpoint(model, tokenizer, optimizer, scheduler, global_step, epoch, best_val_loss, checkpoint_dir, use_distributed, is_main_process)
         raise
     
     except Exception as e:
@@ -437,12 +375,7 @@ def train(
             checkpoint_dir = output_dir / f"checkpoint-error-{global_step}"
             checkpoint_dir.mkdir(exist_ok=True)
             try:
-                if use_distributed:
-                    model.module.save_pretrained(checkpoint_dir)
-                else:
-                    model.save_pretrained(checkpoint_dir)
-                tokenizer.save_pretrained(checkpoint_dir)
-                logger.info(f"Saved error recovery checkpoint to {checkpoint_dir}")
+                save_checkpoint(model, tokenizer, optimizer, scheduler, global_step, epoch, best_val_loss, checkpoint_dir, use_distributed, is_main_process)
             except Exception as save_err:
                 logger.error(f"Could not save recovery checkpoint: {save_err}")
         raise
@@ -452,13 +385,7 @@ def train(
         final_dir = output_dir / "final_model"
         final_dir.mkdir(exist_ok=True)
         
-        if use_distributed:
-            model.module.save_pretrained(final_dir)
-        else:
-            model.save_pretrained(final_dir)
-        
-        tokenizer.save_pretrained(final_dir)
-        logger.info(f"Saved final model to {final_dir}")
+        save_checkpoint(model, tokenizer, optimizer, scheduler, global_step, epoch, best_val_loss, final_dir, use_distributed, is_main_process)
         
         # Push to Hub if configured
         if config.get("model_upload", {}).get("push_to_hub", False):

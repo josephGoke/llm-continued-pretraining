@@ -308,7 +308,7 @@ def split_jsonl(input_file: str, output_dir: str, train_ratio: float = 0.9):
     
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
-    with open(input_file, 'r') as f:
+    with open(input_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
     
     split_point = int(len(lines) * train_ratio)
@@ -318,10 +318,10 @@ def split_jsonl(input_file: str, output_dir: str, train_ratio: float = 0.9):
     train_file = Path(output_dir) / "train.jsonl"
     val_file = Path(output_dir) / "val.jsonl"
     
-    with open(train_file, 'w') as f:
+    with open(train_file, 'w', encoding='utf-8') as f:
         f.writelines(train_lines)
     
-    with open(val_file, 'w') as f:
+    with open(val_file, 'w', encoding='utf-8') as f:
         f.writelines(val_lines)
     
     logger.info(f"Train: {train_file} ({len(train_lines)} lines)")
@@ -351,13 +351,15 @@ Examples:
     parser.add_argument(
         "--input",
         type=str,
-        required=True,
+        default='../folder/',
+        # required=True,
         help="Input file or directory path",
     )
     parser.add_argument(
         "--output",
         type=str,
-        required=True,
+        default='../data/data.jsonl',
+        # required=True,
         help="Output file path or directory",
     )
     parser.add_argument(

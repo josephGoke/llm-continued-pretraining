@@ -8,8 +8,6 @@ venv/
 env/
 .env
 *.log
-outputs/
-models/
 .DS_Store
 *.swp
 *.swo
@@ -18,3 +16,5 @@ wandb/
 checkpoint-*/
 best_model/
 .env.example
+folder
+models/

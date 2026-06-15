@@ -1,4 +1,4 @@
-# Continued Pretraining For LLM Pipeline
+# Continued Pretraining LLM Pipeline
 
 A **production-ready** Python pipeline for continued pretraining of Large Language Models using PyTorch FSDP for distributed training. Built for domain-specific pretraining on raw JSONL text data with enterprise-grade features.
 
